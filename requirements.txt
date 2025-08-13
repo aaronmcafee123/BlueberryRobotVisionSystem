@@ -1,0 +1,16 @@
+albumentations
+numpy
+opencv-python
+pandas
+Pillow
+plotly
+plyfile
+psutil
+pycocotools
+pytorch
+scipy
+torch
+torchvision
+trimesh
+ultralytics
+pyyaml
