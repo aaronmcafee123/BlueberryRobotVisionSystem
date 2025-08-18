@@ -3,6 +3,7 @@ import cv2
 import glob
 import math
 import argparse
+import time
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -845,12 +846,24 @@ class Pipeline:
         self.per_image: Dict[str, List[Prediction]] = {}
         self.assignment: Dict[int, int] = {}
 
+        # --- Timing storage ---
+        self.timing: Dict[str, List[float]] = {k: [] for k in ['yolo', 'unet', 'hough', 'vec3d']}
+        self.yolo_times_rows: List[Dict] = []  # per image
+        self.det_times_rows: List[Dict] = []   # per detection
+
     def run(self):
         imgs = sorted(glob.glob(os.path.join(self.args.images, '*.jpg')) +
                       glob.glob(os.path.join(self.args.images, '*.png')))
         for img_path in imgs:
             name = Path(img_path).name
+
+            # --- YOLO timing ---
+            t0 = time.perf_counter()
             dets = self.yolo.detect(img_path)
+            dt_yolo = time.perf_counter() - t0
+            self.timing['yolo'].append(dt_yolo)
+            self.yolo_times_rows.append({'image_name': name, 'yolo_ms': dt_yolo * 1000.0, 'num_detections': len(dets)})
+
             img = cv2.imread(img_path)
             if img is None:
                 continue
@@ -859,6 +872,12 @@ class Pipeline:
                 x1, y1, x2, y2 = d['bbox']
                 cls = d['cls']
                 roi = img[y1:y2, x1:x2]
+
+                # Initialize timing placeholders
+                unet_ms = np.nan
+                hough_ms = np.nan
+                vec3d_ms = np.nan
+
                 kp2d = None
                 kconf = 0.0
                 circ_img = None
@@ -866,9 +885,22 @@ class Pipeline:
                 orient = None
                 kp3d = None
                 circ3d = None
+
                 if cls == 0:
+                    # --- UNet timing ---
+                    t_unet0 = time.perf_counter()
                     kp2d, kconf = self.kp.detect(roi)
+                    t_unet = time.perf_counter() - t_unet0
+                    unet_ms = t_unet * 1000.0
+                    self.timing['unet'].append(t_unet)
+
+                    # --- Hough timing ---
+                    t_hough0 = time.perf_counter()
                     circles = self.circle.detect(roi)
+                    t_hough = time.perf_counter() - t_hough0
+                    hough_ms = t_hough * 1000.0
+                    self.timing['hough'].append(t_hough)
+
                     if circles:
                         best = select_best_circle(circles, roi.shape,
                                                   self.args.w_radius, self.args.w_center, self.args.w_edge)
@@ -878,13 +910,28 @@ class Pipeline:
                             radius = r
                     if kp2d is not None and circ_img is not None:
                         kp_img = (x1 + kp2d[0], y1 + kp2d[1])
-                        # PASS RADIUS TO GEOMETRIC CORRECTION
+                        # --- 3D vector creation timing ---
+                        t_vec0 = time.perf_counter()
                         orient, kp3d, circ3d = self.cams.vec_and_points_from_2D_pair(
-                            kp_img, 
-                            circ_img, 
+                            kp_img,
+                            circ_img,
                             name,
-                            circle_radius_px=radius  # <-- CRITICAL CORRECTION
+                            circle_radius_px=radius
                         )
+                        t_vec = time.perf_counter() - t_vec0
+                        vec3d_ms = t_vec * 1000.0
+                        self.timing['vec3d'].append(t_vec)
+
+                # Record per-detection timing
+                self.det_times_rows.append({
+                    'image_name': name,
+                    'prediction_index': det_idx,
+                    'class_id': cls,
+                    'unet_ms': unet_ms,
+                    'hough_ms': hough_ms,
+                    'vec3d_ms': vec3d_ms,
+                })
+
                 pred = Prediction(
                     name,
                     len(preds_here),
@@ -903,7 +950,9 @@ class Pipeline:
                 preds_here.append(pred)
             self.per_image[name] = preds_here
             self.predictions.extend(preds_here)
+
         self.evaluate_save()
+        self.summarize_timings()
 
     def _evaluate_save_quat(self, csv_path: str):
         gts = self.gt_mgr.data
@@ -1017,6 +1066,47 @@ class Pipeline:
             self._evaluate_save_3d(out_csv)
         else:
             self._evaluate_save_quat(out_csv)
+
+    # --- NEW: summarize & save timing info ---
+    def summarize_timings(self):
+        os.makedirs(self.args.out_dir, exist_ok=True)
+        # Save detailed timing tables
+        if self.yolo_times_rows:
+            pd.DataFrame(self.yolo_times_rows).to_csv(
+                os.path.join(self.args.out_dir, 'timings_yolo_per_image.csv'), index=False
+            )
+        if self.det_times_rows:
+            pd.DataFrame(self.det_times_rows).to_csv(
+                os.path.join(self.args.out_dir, 'timings_per_detection.csv'), index=False
+            )
+
+        # Compute summary stats
+        def stats(arr: List[float]):
+            if not arr:
+                return {'count': 0, 'avg_ms': np.nan, 'median_ms': np.nan, 'min_ms': np.nan, 'max_ms': np.nan}
+            ms = np.array(arr, dtype=np.float64) * 1000.0
+            return {
+                'count': int(ms.size),
+                'avg_ms': float(ms.mean()),
+                'median_ms': float(np.median(ms)),
+                'min_ms': float(ms.min()),
+                'max_ms': float(ms.max()),
+            }
+
+        summary_rows = []
+        for stage in ['yolo', 'unet', 'hough', 'vec3d']:
+            s = stats(self.timing[stage])
+            summary_rows.append({'stage': stage, **s})
+        pd.DataFrame(summary_rows).to_csv(os.path.join(self.args.out_dir, 'timings_summary.csv'), index=False)
+
+        # Console-friendly summary
+        def fmt(x):
+            return 'n/a' if (x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x)))) else f"{x:.2f}"
+        print("[Timing] Average times (ms): "
+              f"YOLO={fmt(summary_rows[0]['avg_ms'])}, "
+              f"UNet={fmt(summary_rows[1]['avg_ms'])}, "
+              f"Hough={fmt(summary_rows[2]['avg_ms'])}, "
+              f"Vec3D={fmt(summary_rows[3]['avg_ms'])}")
 
 
 def parse_args():
