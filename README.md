@@ -21,3 +21,11 @@ This repository contains code for detecting and analyzing blueberry orientation 
 ## Usage
 
 Describe your main scripts and how to use them here...
+
+##Dataset
+
+Due to get Doi
+
+For the meantime, Dataset can be found from the below Drive Folder
+
+https://drive.google.com/drive/folders/1iYZ0QNN5ANqcA-h6fNQK_xVrXyBWERZZ?usp=sharing
