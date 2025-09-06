@@ -14,13 +14,9 @@ This repository contains code for detecting and analyzing blueberry orientation 
 
 ## Setup
 
-1. Clone this repository
-2. Install requirements: `pip install -r requirements.txt`
-3. Run scripts as needed
 
 ## Usage
 
-Describe your main scripts and how to use them here...
 
 ## Dataset
 
